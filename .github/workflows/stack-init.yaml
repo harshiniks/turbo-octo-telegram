@@ -1,0 +1,87 @@
+name: "provision stack build/ deploy for Azure app service"
+
+on:
+  workflow_dispatch:
+   inputs:
+    CREATE_AZURE_WEBAPP:
+     required: true
+  
+env:
+  AZURE_WEBAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+
+      - name: move the file
+        run: |
+          mv ./instance-contents/README.md ./README.md
+          mv ./instance-contents/pull_request_template.md ./pull_request_template.md
+          mkdir ./.github/ISSUE_TEMPLATE
+          mv ./instance-contents/bug.md ./.github/ISSUE_TEMPLATE/bug.md
+          mv ./instance-contents/feature_request.md ./.github/ISSUE_TEMPLATE/feature_request.md
+          rm -r ./instance-contents
+      
+      - name: Commit files
+        run: |
+          git config --global user.name '${{github.actor}}'
+          git config --global user.email '${{github.actor}}@users.noreply.github.com'
+          git add -A
+          git commit -m "Added readme."
+          git push
+          
+      - name: use python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.*'
+          
+      - name: Create and start virtual environment
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+        
+      - name: Collect static
+        run: python manage.py collectstatic --noinput
+    
+      - name: Upload artifact for deployment jobs
+        uses: actions/upload-artifact@v2
+        with:
+          name: python-app
+          path: |
+            . 
+            !venv/
+  
+  deploy-to-webapp:
+    needs: setup
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v2
+        with:
+          name: python-app
+          path: .
+      - uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Azure CLI script
+        uses: azure/CLI@v1
+        if: ${{ github.event.inputs.CREATE_AZURE_WEBAPP == 'yes' }} 
+        with:
+          inlineScript: |
+            az appservice plan create --name ${{ secrets.AZURE_WEBAPP_NAME }}-plan --is-linux --resource-group ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+            az webapp create --name ${{ secrets.AZURE_WEBAPP_NAME }} --runtime 'PYTHON|3.8' --plan ${{ secrets.AZURE_WEBAPP_NAME }}-plan --resource-group ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+      - uses: azure/appservice-settings@v1
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          app-settings-json: '[{ "name": "DISABLE_COLLECTSTATIC", "value": "true" }, { "name": "POST_BUILD_COMMAND",  "value": "python manage.py makemigrations && python manage.py migrate" }, { "name": "SCM_DO_BUILD_DURING_DEPLOYMENT", "value": "true" }, { "name": "DJANGO_ENV", "value": "production"}]'
+      - name: Deploy web App using GH Action azure/webapps-deploy
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
